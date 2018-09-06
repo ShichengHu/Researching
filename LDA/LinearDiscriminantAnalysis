@@ -1,0 +1,100 @@
+import numpy as np
+from Util.Bases import RegressionBase
+
+
+class LinearDiscriminantAnalysis(RegressionBase):
+    """
+    可以实现对多分类数据的降维,但只实现了二分类
+    """
+    def __init__(self):
+        RegressionBase.__init__(self)
+        self._x = self._y = None
+        self._w = None  # 投影矩阵
+        self._labels = None  # 分类信息
+        self._mean_vector = None  # 各类别均值向量
+        self._processing_cache = {}  # 全局散度矩阵，类内散度矩阵
+        self._prior_proba = None  # 各类别先验概率
+
+    @staticmethod
+    def gaussian(mu, std, x):
+        return np.exp(-(x - mu)**2 / (2*std**2)) / ((2 * np.pi) ** 0.5 * std)
+
+    def _feed_data(self, x, y):
+        self._x, self._y = np.atleast_2d(x), np.atleast_1d(y)
+        self._labels = [self._y == label for label in set(self._y)]  # 分类信息
+        tmp_data = [self._x[label, :] for label in self._labels]  # 对x实现分类
+        self._prior_proba = np.array([len(label) for label in self._labels])/len(self._y)
+        self._mean_vector = np.array([np.mean(xx, axis=0) for xx in tmp_data])  # 各类别的均值向量
+        mu = np.average(self._mean_vector, axis=0)  # 全局均值向量
+        # 全局散度矩阵St += (X - mu)(X - mu).T
+        self._processing_cache["total_scatter"] = np.dot((self._x - mu).T, self._x - mu)
+        # self._processing_cache["Within_Class_Scatter"] = np.zeros(n, n)
+        self._processing_cache["within_scatter"] = [np.dot((x_i - mu_i).T, x_i - mu_i)
+                                                    for x_i, mu_i in zip(tmp_data, self._mean_vector)]
+
+    def fit(self, x, y, **kwargs):
+        """
+        多分类的LDA算法
+
+        St : total scatter
+        Sw : within scatter
+        Sb : between scatter
+        :param x: 显然对应x, y应当先数值化
+        :param y:
+        :param kwargs: 我打算考虑控制降维后的维度
+        :return:
+        """
+        self._feed_data(x, y)
+        k = kwargs.get("k", len(self._labels))
+        # 初始化参数
+        self._w = np.zeros((k-1, k-1))
+        # Sw(-1) * Sb 并且得到特征值和相应的特征向量, Sw和Sb 都是n阶方阵，n为X特征数
+        sw = 0  # 类内散度矩阵 Sw += pi * Swi for i in range(k)
+        for proba, swi in zip(self._prior_proba, self._processing_cache["within_scatter"]):
+            sw += proba * swi
+        st = self._processing_cache["total_scatter"]
+        sb = st - sw  # 类间散度矩阵
+        eig_values, eig_vector = np.linalg.eig(np.linalg.inv(sw).dot(sb))
+        # k = np.argsort(eig_values)[:len(self._labels)]
+        # W为前K-1个最大特征值对应特征向量组成的矩阵, 按列取，W是(k-1)*n
+        self._w = eig_vector[:, np.argsort(eig_values)[:: -1][:k-1]]  # arg sort从小到大排，因此先倒序
+        self._fit()
+
+    def dimensionality_reduction(self, x):
+        # y = W.T * x
+        x = np.atleast_2d(x)
+        return x.dot(self._w)
+
+    def predict(self, x):
+        """
+        预测分类结果
+
+        xx : 先存储投影结果，然后计算投影的概率密度，然后比较概率密度array(n_samples. classes-1)
+        rs : 各个类别在当前数据的概率密度。通过argmax得到判决结果
+        :param x: 测试集数据 array(n_samples, n_features)
+        :return: 预测分类结果
+        """
+        # 要求必须要先对y数值化，从0开始
+        # 先投影到超平面上， 然后求解投影后的概率密度，比较，选择概率密度大的作为预测结果
+        xx = self.dimensionality_reduction(x)
+        rs = []
+        for mu_i, std_i in zip(self._processing_cache["gaussian_probability"][0],
+                               self._processing_cache["gaussian_probability"][1]):
+            rs.append(self.gaussian(mu_i, std_i, xx))
+        rs = np.array(rs)  # 有多少类别就有多少维度，虽然后来用arg max 选择了类别但是似乎没有降维，至少得是一维吧
+        return np.argmax(np.array(rs), axis=0).flatten()
+
+    def _fit(self):
+        """求得各分类的概率密度
+
+        通过dimensionality reduction得到降维后的y,
+        y_projection : like array(n_samples, classes-1), if classes is not 2, I don't know how to make decision
+        tmp_label : store after project different class's division info.
+        mu : 各类别投影的均值向量，只针对二维情况
+        std : 标准差， 只针对二维
+        gaussian_probability : store mu, std in a list, be used in gain probability density"""
+        y_projection = self.dimensionality_reduction(self._x).flatten()  # 通过投影矩阵降维后的y，但是很明显对于多分类，维度在多维时可不行
+        tmp_label = np.array([y_projection[label] for label in self._labels])
+        mu = np.array([np.mean(label) for label in tmp_label])
+        std = np.array([np.std(label) for label in tmp_label])
+        self._processing_cache["gaussian_probability"] = [mu, std]  # 存放求解概率密度的参数就足矣
